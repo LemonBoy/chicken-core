@@ -51,25 +51,10 @@
 /* TODO: Winsock select() only works for sockets */
 # include <winsock2.h>
 /* Beware: winsock2.h must come BEFORE windows.h */
-# define C_msleep(n)   (Sleep((DWORD)C_num_to_uint64(n)), C_SCHEME_TRUE)
+# define C_msleep(ms)   (Sleep((DWORD)ms), 0)
 #else
 # include <sys/time.h>
-static C_word C_msleep(C_word ms);
-C_word C_msleep(C_word ms) {
-#ifdef __CYGWIN__
-  if(usleep((useconds_t)C_num_to_uint64(ms) * 1000) == -1) return C_SCHEME_FALSE;
-#else
-  struct timespec ts;
-  C_word ab[C_SIZEOF_FIX_BIGNUM], *a = ab,
-         sec = C_s_a_u_i_integer_quotient(&a, 2, ms, C_fix(1000)),
-         msec = C_s_a_u_i_integer_remainder(&a, 2, ms, C_fix(1000));
-  ts.tv_sec = (time_t)C_num_to_uint64(sec);
-  ts.tv_nsec = (long)C_unfix(msec) * 1000000;
-  
-  if(nanosleep(&ts, NULL) == -1) return C_SCHEME_FALSE;
-#endif
-  return C_SCHEME_TRUE;
-}
+# define C_msleep(ms)   usleep((useconds_t)ms * 1000)
 #endif
 
 #include <assert.h>
@@ -84,41 +69,48 @@ typedef struct C_poll_ctx_struct {
 } C_POLL_CTX;
 
 static void *C_allocate_ctx(void) {
-  void *ctx = calloc(1, sizeof(C_POLL_CTX));
+  C_POLL_CTX *ctx = calloc(1, sizeof(*ctx));
+
   if (ctx == NULL)
     C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+
   return ctx;
 }
 
 static void C_finalize_ctx(C_POLL_CTX *ctx) {
   assert(ctx != NULL);
+
   free(ctx);
 }
 
 static int C_fd_ready(C_POLL_CTX *ctx, int fd, int pos, int out) {
   assert(ctx != NULL);
+
   return out ? FD_ISSET(fd, &ctx->out_fdset)
              : FD_ISSET(fd, &ctx->in_fdset);
 }
 
 static int C_ready_fds_timeout(C_POLL_CTX *ctx, int to, unsigned int tm) {
   struct timeval timeout;
+
   assert(ctx != NULL);
-  timeout.tv_sec = tm / 1000;
+
   // XXX fmod on a integer?
+  timeout.tv_sec = tm / 1000;
   timeout.tv_usec = fmod(tm, 1000) * 1000;
-  if (ctx->nfds != 0) {
+
+  if (ctx->nfds != 0)
     /* we use FD_SETSIZE, but really should use max fd */
     return select(FD_SETSIZE, &ctx->in_fdset, &ctx->out_fdset, NULL, to ? &timeout : NULL);
-  }
-  if (to != 0) {
-    return usleep(1000 * tm);
-  }
+  if (to != 0)
+    return C_msleep(tm);
+
   return 0;
 }
 
 static void C_prepare_fdset(C_POLL_CTX *ctx, int length) {
   assert(ctx != NULL);
+
   ctx->nfds = length;
   FD_ZERO(&ctx->in_fdset);
   FD_ZERO(&ctx->out_fdset);
@@ -139,14 +131,17 @@ typedef struct C_poll_ctx_struct {
 } C_POLL_CTX;
 
 static void *C_allocate_ctx(void) {
-  void *ctx = calloc(1, sizeof(C_POLL_CTX));
+  C_POLL_CTX *ctx = calloc(1, sizeof(*ctx));
+
   if (ctx == NULL)
     C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+
   return ctx;
 }
 
 static void C_finalize_ctx(C_POLL_CTX *ctx) {
   assert(ctx != NULL);
+
   free(ctx->fdset);
   free(ctx);
 }
@@ -154,36 +149,43 @@ static void C_finalize_ctx(C_POLL_CTX *ctx) {
 static int C_fd_ready(C_POLL_CTX *ctx, int fd, int pos, int out) {
   assert(ctx != NULL);
   assert(fd == ctx->fdset[pos].fd); /* Must match position in ##sys#fd-list! */
+
   const short mask = out ? POLLOUT|POLLERR|POLLHUP|POLLNVAL
                          : POLLIN|POLLERR|POLLHUP|POLLNVAL;
+
   return (ctx->fdset[pos].revents & mask);
 }
 
 static int C_ready_fds_timeout(C_POLL_CTX *ctx, int to, unsigned int tm) {
   assert(ctx != NULL);
-  if (ctx->nfds != 0) {
+
+  if (ctx->nfds != 0)
     return poll(ctx->fdset, ctx->nfds, to ? tm : -1);
-  }
-  if (to != 0) {
-    return usleep(1000 * tm);
-  }
+  if (to != 0)
+    return C_msleep(tm);
+
   return 0;
 }
 
 static void C_prepare_fdset(C_POLL_CTX *ctx, int length) {
   assert(ctx != NULL);
-  /* TODO: Only realloc when needed? */
-  ctx->fdset = realloc(ctx->fdset, sizeof(struct pollfd) * length);
-  if (ctx->fdset == NULL)
-    C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+
   ctx->nfds = 0;
+  if (length != 0) {
+    /* TODO: Only realloc when needed? */
+    ctx->fdset = realloc(ctx->fdset, sizeof(struct pollfd) * length);
+    if (ctx->fdset == NULL)
+      C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+  }
 }
 
 /* This *must* be called in order, so position will match ##sys#fd-list */
 static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
   assert(ctx != NULL);
+
   ctx->fdset[ctx->nfds].events = ((input ? POLLIN : 0) | (output ? POLLOUT : 0));
-  ctx->fdset[ctx->nfds++].fd = fd;
+  ctx->fdset[ctx->nfds].fd = fd;
+  ctx->nfds += 1;
 }
 #endif
 <#
