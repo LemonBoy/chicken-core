@@ -37,8 +37,9 @@
 	remove-from-ready-queue fdset-test create-fdset stderr delq
 	##sys#clear-i/o-state-for-thread! ##sys#abandon-mutexes) 
   (not inline ##sys#interrupt-hook ##sys#sleep-hook ##sys#force-primordial)
-  (unsafe)
-  (foreign-declare #<<EOF
+  (unsafe))
+
+#>
 #ifdef HAVE_ERRNO_H
 # include <errno.h>
 # define C_signal_interrupted_p     C_mk_bool(errno == EINTR)
@@ -71,67 +72,121 @@ C_word C_msleep(C_word ms) {
 }
 #endif
 
-#ifdef NO_POSIX_POLL
+#include <assert.h>
+
+#ifndef NO_POSIX_POLL
 
 /* Shouldn't we include <sys/select.h> here? */
-static fd_set C_fdset_input, C_fdset_output;
+typedef struct C_poll_ctx_struct {
+  int nfds;
+  fd_set in_fdset;
+  fd_set out_fdset;
+} C_POLL_CTX;
 
-#define C_fd_input_ready(fd,pos)  C_mk_bool(FD_ISSET(C_unfix(fd), &C_fdset_input))
-#define C_fd_output_ready(fd,pos)  C_mk_bool(FD_ISSET(C_unfix(fd), &C_fdset_output))
+static void *C_allocate_ctx(void) {
+  void *ctx = calloc(1, sizeof(C_POLL_CTX));
+  if (ctx == NULL)
+    C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+  return ctx;
+}
 
-inline static int C_ready_fds_timeout(int to, unsigned int tm) {
+static void C_finalize_ctx(C_POLL_CTX *ctx) {
+  assert(ctx != NULL);
+  free(ctx);
+}
+
+static int C_fd_ready(C_POLL_CTX *ctx, int fd, int pos, int out) {
+  assert(ctx != NULL);
+  return out ? FD_ISSET(fd, &ctx->out_fdset)
+             : FD_ISSET(fd, &ctx->in_fdset);
+}
+
+static int C_ready_fds_timeout(C_POLL_CTX *ctx, int to, unsigned int tm) {
   struct timeval timeout;
+  assert(ctx != NULL);
   timeout.tv_sec = tm / 1000;
+  // XXX fmod on a integer?
   timeout.tv_usec = fmod(tm, 1000) * 1000;
-  /* we use FD_SETSIZE, but really should use max fd */
-  return select(FD_SETSIZE, &C_fdset_input, &C_fdset_output, NULL, to ? &timeout : NULL);
+  if (ctx->nfds != 0) {
+    /* we use FD_SETSIZE, but really should use max fd */
+    return select(FD_SETSIZE, &ctx->in_fdset, &ctx->out_fdset, NULL, to ? &timeout : NULL);
+  }
+  if (to != 0) {
+    return usleep(1000 * tm);
+  }
+  return 0;
 }
 
-inline static void C_prepare_fdset(int length) {
-  FD_ZERO(&C_fdset_input);
-  FD_ZERO(&C_fdset_output);
+static void C_prepare_fdset(C_POLL_CTX *ctx, int length) {
+  assert(ctx != NULL);
+  ctx->nfds = length;
+  FD_ZERO(&ctx->in_fdset);
+  FD_ZERO(&ctx->out_fdset);
 }
 
-inline static void C_fdset_add(int fd, int input, int output) {
-  if (input) FD_SET(fd, &C_fdset_input);
-  if (output) FD_SET(fd, &C_fdset_output);
+static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
+  assert(ctx != NULL);
+  if (input) FD_SET(fd, &ctx->in_fdset);
+  if (output) FD_SET(fd, &ctx->out_fdset);
 }
 
 #else
 #  include <poll.h>
-#  include <assert.h>
 
-static int C_fdset_nfds;
-static struct pollfd *C_fdset_set = NULL;
+typedef struct C_poll_ctx_struct {
+  int nfds;
+  struct pollfd *fdset;
+} C_POLL_CTX;
 
-inline static int C_fd_ready(int fd, int pos, int what) {
-  assert(fd == C_fdset_set[pos].fd); /* Must match position in ##sys#fd-list! */
-  return(C_fdset_set[pos].revents & what);
-}
-
-#define C_fd_input_ready(fd,pos)  C_mk_bool(C_fd_ready(C_unfix(fd), C_unfix(pos),POLLIN|POLLERR|POLLHUP|POLLNVAL))
-#define C_fd_output_ready(fd,pos)  C_mk_bool(C_fd_ready(C_unfix(fd), C_unfix(pos),POLLOUT|POLLERR|POLLHUP|POLLNVAL))
-
-inline static int C_ready_fds_timeout(int to, unsigned int tm) {
-  return poll(C_fdset_set, C_fdset_nfds, to ? tm : -1);
-}
-
-inline static void C_prepare_fdset(int length) {
-  /* TODO: Only realloc when needed? */
-  C_fdset_set = realloc(C_fdset_set, sizeof(struct pollfd) * length);
-  if (C_fdset_set == NULL)
+static void *C_allocate_ctx(void) {
+  void *ctx = calloc(1, sizeof(C_POLL_CTX));
+  if (ctx == NULL)
     C_halt(C_SCHEME_FALSE); /* Ugly: no message */
-  C_fdset_nfds = 0;
+  return ctx;
+}
+
+static void C_finalize_ctx(C_POLL_CTX *ctx) {
+  assert(ctx != NULL);
+  free(ctx->fdset);
+  free(ctx);
+}
+
+static int C_fd_ready(C_POLL_CTX *ctx, int fd, int pos, int out) {
+  assert(ctx != NULL);
+  assert(fd == ctx->fdset[pos].fd); /* Must match position in ##sys#fd-list! */
+  const short mask = out ? POLLOUT|POLLERR|POLLHUP|POLLNVAL
+                         : POLLIN|POLLERR|POLLHUP|POLLNVAL;
+  return (ctx->fdset[pos].revents & mask);
+}
+
+static int C_ready_fds_timeout(C_POLL_CTX *ctx, int to, unsigned int tm) {
+  assert(ctx != NULL);
+  if (ctx->nfds != 0) {
+    return poll(ctx->fdset, ctx->nfds, to ? tm : -1);
+  }
+  if (to != 0) {
+    return usleep(1000 * tm);
+  }
+  return 0;
+}
+
+static void C_prepare_fdset(C_POLL_CTX *ctx, int length) {
+  assert(ctx != NULL);
+  /* TODO: Only realloc when needed? */
+  ctx->fdset = realloc(ctx->fdset, sizeof(struct pollfd) * length);
+  if (ctx->fdset == NULL)
+    C_halt(C_SCHEME_FALSE); /* Ugly: no message */
+  ctx->nfds = 0;
 }
 
 /* This *must* be called in order, so position will match ##sys#fd-list */
-inline static void C_fdset_add(int fd, int input, int output) {
-  C_fdset_set[C_fdset_nfds].events = ((input ? POLLIN : 0) | (output ? POLLOUT : 0));
-  C_fdset_set[C_fdset_nfds++].fd = fd;
+static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
+  assert(ctx != NULL);
+  ctx->fdset[ctx->nfds].events = ((input ? POLLIN : 0) | (output ? POLLOUT : 0));
+  ctx->fdset[ctx->nfds++].fd = fd;
 }
 #endif
-EOF
-) )
+<#
 
 (import chicken chicken.format)
 
@@ -154,6 +209,20 @@ EOF
 (define-syntax panic
   (syntax-rules ()
     ((_ msg) (##core#inline "C_halt" msg))))
+
+(define-record $SCHED$ allocate finalize prepare watch-fd run check)
+
+(define *DEFAULT-SCHED*
+  (make-$SCHED$
+    (foreign-lambda c-pointer "C_allocate_ctx")
+    (foreign-lambda void "C_finalize_ctx" c-pointer)
+    (foreign-lambda void "C_prepare_fdset" c-pointer int)
+    (foreign-lambda void "C_fdset_add" c-pointer int bool bool)
+    (foreign-lambda int "C_ready_fds_timeout" c-pointer bool unsigned-integer)
+    (foreign-lambda bool "C_fd_ready" c-pointer unsigned-integer unsigned-integer bool)))
+
+(set! ##sys#active-scheduler *DEFAULT-SCHED*)
+(define ##sys#scheduler-context #f)
 
 (define (delq x lst)
   (let loop ([lst lst])
@@ -205,7 +274,7 @@ EOF
 			    ;; If there are no threads blocking on a select call (fd-list)
 			    ;; but there are threads in the timeout list then sleep for
 			    ;; the number of milliseconds of next thread to wake up.
-			    (when (and (null? ready-queue-head)
+			    #;(when (and (null? ready-queue-head)
 				       (null? ##sys#fd-list) 
 				       (pair? ##sys#timeout-list))
 			      (let* ((tmo1 (caar ##sys#timeout-list))
@@ -218,10 +287,11 @@ EOF
 					"C_signal_interrupted_p" bool) ) ) ) ) ) )
 		      (loop (cdr lst)) ) ) ) ) ) )
       ;; Unblock threads blocked by I/O:
-      (if eintr
-	  (##sys#force-primordial)	; force it to handle user-interrupt
-	  (unless (null? ##sys#fd-list)
-	    (##sys#unblock-threads-for-i/o) ) )
+      (##sys#unblock-threads-for-i/o)
+      #;(if eintr
+          (##sys#force-primordial)	; force it to handle user-interrupt
+          (when (null? ##sys#fd-list)
+            (##sys#unblock-threads-for-i/o) ) )
       ;; Fetch and activate next ready thread:
       (let loop2 ()
 	(let ([nt (remove-from-ready-queue)])
@@ -396,7 +466,11 @@ EOF
 (define ##sys#fd-list '())		; ((FD1 THREAD1 ...) ...)
 
 (define (create-fdset)
-  ((foreign-lambda void "C_prepare_fdset" int) (##sys#length ##sys#fd-list))
+  (unless ##sys#scheduler-context
+    (set! ##sys#scheduler-context (($SCHED$-allocate ##sys#active-scheduler))))
+  (($SCHED$-prepare ##sys#active-scheduler)
+   ##sys#scheduler-context
+   (##sys#length ##sys#fd-list))
   (let loop ((lst ##sys#fd-list))
     (unless (null? lst)
       (let ((fd (caar lst))
@@ -423,7 +497,8 @@ EOF
 	 (cdar lst))
 	;; Our position in fd-list must match fdset array position, so
 	;; always add an fdset entry, even if input & output are #f.
-	((foreign-lambda void "C_fdset_add" int bool bool) fd input output)
+	(($SCHED$-watch-fd ##sys#active-scheduler)
+         ##sys#scheduler-context fd input output)
 	(loop (cdr lst))))))
 
 (define (fdset-test inf outf i/o)
@@ -461,8 +536,8 @@ EOF
 		    (max 0 (- tmo1 now)) )
 		  0))) ; otherwise immediate timeout.
     (dbg "waiting for I/O with timeout " tmo)
-    (let ((n ((foreign-lambda int "C_ready_fds_timeout" bool unsigned-integer)
-	      (or rq? to?) tmo)))
+    (let ((n (($SCHED$-run ##sys#active-scheduler)
+              ##sys#scheduler-context (or rq? to?) tmo)))
       (dbg n " fds ready")
       (cond [(eq? -1 n)
 	     (dbg "select(2)/poll(2) returned with result -1" )
@@ -476,8 +551,12 @@ EOF
 			    (fd (car a))
 			    ;; pos *must* match position of fd in ##sys#fd-list
 			    ;; This is checked in C_fd_ready with assert()
-			    (inf (##core#inline "C_fd_input_ready" fd pos))
-			    (outf (##core#inline "C_fd_output_ready" fd pos)))
+			    (inf
+                              (($SCHED$-check ##sys#active-scheduler)
+                               ##sys#scheduler-context fd pos #f))
+			    (outf
+                              (($SCHED$-check ##sys#active-scheduler)
+                               ##sys#scheduler-context fd pos #t)))
 		       (dbg "fd " fd " state: input=" inf ", output=" outf)
 		       (if (or inf outf)
 			   (let loop2 ((threads (cdr a)) (keep '()))

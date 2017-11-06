@@ -5421,6 +5421,8 @@ EOF
 (define (##sys#foreign-unsigned-ranged-integer-argument obj size)
   (##core#inline "C_i_foreign_unsigned_ranged_integer_argumentp" obj size))
 
+(define ##sys#active-scheduler #f)
+
 ;;; Low-level threading interface:
 
 (define ##sys#default-thread-quantum 10000)
