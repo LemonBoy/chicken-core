@@ -263,7 +263,7 @@ static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
 		(let* ([tmo1 (caar lst)] ; timeout of thread on list
 		       [tto (cdar lst)]	 ; thread on list
 		       [tmo2 (##sys#slot tto 4)] ) ; timeout value stored in thread
-		  (dbg "timeout: " tto " -> " tmo2 " (now: " now ")")
+		  (dbg "timeout: " tto " -> " tmo2 " (tmo1 " tmo1 ") (now: " now ")")
 		  (if (equal? tmo1 tmo2)  ;XXX why do we check this?
 		      (if (>= now tmo1) ; timeout reached?
 			  (begin
@@ -288,19 +288,20 @@ static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
 				       (foreign-value
 					"C_signal_interrupted_p" bool) ) ) ) ) ) )
 		      (loop (cdr lst)) ) ) ) ) ) )
+
       ;; Unblock threads blocked by I/O:
       (##sys#unblock-threads-for-i/o)
-      #;(if eintr
-          (##sys#force-primordial)	; force it to handle user-interrupt
-          (when (null? ##sys#fd-list)
-            (##sys#unblock-threads-for-i/o) ) )
+
+      ; (when (foreign-value "C_signal_interrupted_p" bool)
+      ;   (##sys#force-primordial)) ; force it to handle user-interrupt
+
+      (when (and (null? ##sys#timeout-list) (null? ready-queue-head))
+        (panic "deadlock"))
+
       ;; Fetch and activate next ready thread:
       (let loop2 ()
 	(let ([nt (remove-from-ready-queue)])
-	  (cond [(not nt) 
-		 (if (and (null? ##sys#timeout-list) (null? ##sys#fd-list))
-		     (panic "deadlock")
-		     (loop1) ) ]
+	  (cond [(not nt) (loop1)]
 		[(eq? (##sys#slot nt 3) 'ready) (switch nt)]
 		[else (loop2)] ) ) ) ) ) )
 
@@ -533,7 +534,8 @@ static void C_fdset_add(C_POLL_CTX *ctx, int fd, int input, int output) {
   (let* ((to? (pair? ##sys#timeout-list))
 	 (rq? (pair? ready-queue-head))
 	 (tmo (if (and to? (not rq?)) ; no thread was unblocked by timeout, so wait
-		  (let* ((tmo1 (caar ##sys#timeout-list))
+		  (let* ((tmo1 (inexact->exact
+                                 (round (caar ##sys#timeout-list))))
 			 (now (##core#inline_allocate ("C_a_i_current_milliseconds" 7) #f)))
 		    (max 0 (- tmo1 now)) )
 		  0))) ; otherwise immediate timeout.
