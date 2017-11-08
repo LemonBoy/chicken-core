@@ -1119,7 +1119,10 @@
 		     (if (and (pair? body)
 			      (null? (cdr body))
 			      (string? (car body)))
-			 `((##core#include ,(car body) ,##sys#current-source-filename))
+                         `((##core#begin
+                             ,@(##sys#include-forms-from-file (car body)
+                                 ##sys#current-source-filename
+                                 (memq #:compiling ##sys#features))))
 			 body))))))))))
 
 (##sys#extend-macro-environment

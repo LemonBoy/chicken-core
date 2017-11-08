@@ -511,13 +511,6 @@
 			   (##sys#canonicalize-body (cddr x) se #f)
 			   e #f tf cntr se #f))
 
-			 ((##core#include)
-			  (##sys#include-forms-from-file
-			   (cadr x)
-			   (caddr x)
-			   (lambda (forms)
-			     (compile `(##core#begin ,@forms) e #f tf cntr se tl?))))
-
 			 ((##core#let-module-alias)
 			  (##sys#with-module-aliases
 			   (map (lambda (b)
@@ -1164,8 +1157,9 @@
   (let ((with-input-from-file with-input-from-file)
 	(read read)
 	(reverse reverse))
-    (lambda (filename source k)
-      (let ((path (##sys#resolve-include-filename filename #t #f source)))
+    (lambda (filename source track-source?)
+      (let ((path (##sys#resolve-include-filename filename #t #f source))
+            (readf (if track-source? read #|/source-info|# read)))
 	(when (not path)
 	  (##sys#signal-hook #:file-error 'include "cannot open file" filename))
 	(when (load-verbose)
@@ -1173,10 +1167,10 @@
 	(with-input-from-file path
 	  (lambda ()
 	    (fluid-let ((##sys#current-source-filename path))
-	      (do ((x (read) (read))
+	      (do ((x (readf) (readf))
 		   (xs '() (cons x xs)))
 		  ((eof-object? x)
-		   (k (reverse xs)))))))))))
+		   (reverse xs))))))))))
 
 
 ;;; Extensions:

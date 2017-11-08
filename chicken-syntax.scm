@@ -392,14 +392,18 @@
  (##sys#er-transformer
   (lambda (form r c)
     (##sys#check-syntax 'include form '(_ string))
-    `(##core#include ,(cadr form) #f))))
+    `(##core#begin
+       ,@(##sys#include-forms-from-file (cadr form) #f
+           (memq #:compiling ##sys#features))))))
 
 (##sys#extend-macro-environment
  'include-relative '()
  (##sys#er-transformer
   (lambda (form r c)
     (##sys#check-syntax 'include-relative form '(_ string))
-    `(##core#include ,(cadr form) ,##sys#current-source-filename))))
+    `(##core#begin
+       ,@(##sys#include-forms-from-file (cadr form) ##sys#current-source-filename
+           (memq #:compiling ##sys#features))))))
 
 (##sys#extend-macro-environment
  'fluid-let '()
